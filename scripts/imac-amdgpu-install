@@ -196,6 +196,38 @@ if [ "$MODE" = dry ]; then
   exit 0
 fi
 
+#--- signing key
+#
+# A fresh objtree has no .kernel_signing_key.pem and `make modules` dies at the
+# `certs` target. This cost 40 minutes on 7.2.9 and is invisible until make
+# fails partway through.
+#
+# Do NOT generate one with openssl genrsa: that produces PKCS#1
+# ("BEGIN RSA PRIVATE KEY"), and the kernel's own certs/extract-cert rejects it
+# with "PEM routines::no start line". It wants PKCS#8 ("BEGIN PRIVATE KEY").
+# The reliable source is a previous objtree, which already has a working pair.
+KEY="$OBJ/.kernel_signing_key.pem"
+if [ ! -f "$KEY" ]; then
+  say "  objtree has no signing key; make modules would fail at certs/"
+  FOUND=""
+  for prev in $(ls -1d /usr/src/linux-*-obj/x86_64/default 2>/dev/null | sort -Vr); do
+    [ "$prev" = "$OBJ" ] && continue
+    if [ -f "$prev/.kernel_signing_key.pem" ]; then FOUND="$prev"; break; fi
+  done
+  if [ -n "$FOUND" ]; then
+    cp "$FOUND/.kernel_signing_key.pem" "$KEY"
+    chmod 600 "$KEY"
+    ok "copied a PKCS#8 signing key from $FOUND"
+  else
+    bad "no signing key in this objtree and none found in any other /usr/src objtree"
+    say "  fix: openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out $KEY"
+    say "  (genpkey writes PKCS#8, which is what extract-cert accepts; genrsa does not)"
+    exit 1
+  fi
+else
+  ok "signing key present"
+fi
+
 step "build (20-45 minutes, this is expected)"
 if ! make -C "$SRC" -j"$(nproc)" O="$OBJ" modules >>"$LOG" 2>&1; then
   bad "make modules failed"
@@ -233,25 +265,46 @@ ok "depmod"
 
 #--- initramfs. Without this the module is on disk but not in the early boot
 # image, and the panel comes up with whatever in-tree amdgpu the initrd had.
-INITRD="/boot/efi-xbootldr/opensuse-slowroll/$KVER/initrd"
-[ -f "$INITRD" ] || INITRD="/boot/efi/opensuse-slowroll/$KVER/initrd"
-if [ -f "$INITRD" ]; then
-  step "initramfs"
-  if dracut -f "$INITRD" "$KVER" >>"$LOG" 2>&1; then
-    N=$(lsinitrd "$INITRD" 2>/dev/null | grep -cE 'updates/amdgpu|updates/snd-hda-codec-cs8409')
-    if [ "$N" -ge 2 ]; then
-      ok "initramfs rebuilt, carries both patched modules"
-    else
-      bad "initramfs rebuilt but carries only $N of the 2 required modules"
-      say "  check: lsinitrd $INITRD | grep -E 'updates/(amdgpu|snd-hda-codec-cs8409)'"
-      exit 1
-    fi
-  else
+#
+# Look on the ESP first: that is the only partition systemd-boot reads on this
+# machine. If neither location has one, BUILD it rather than warning - a
+# warning here means the kernel is not bootable on 5K, and that is exactly the
+# state this whole script exists to prevent. This was the last manual step in
+# the 7.2.9 run.
+for cand in /boot/efi/opensuse-slowroll/$KVER/initrd \
+            /boot/efi-xbootldr/opensuse-slowroll/$KVER/initrd; do
+  [ -f "$cand" ] && { INITRD="$cand"; break; }
+done
+step "initramfs"
+if [ -z "${INITRD:-}" ]; then
+  # ESP is the boot partition; build there so the result is actually bootable.
+  mkdir -p "/boot/efi/opensuse-slowroll/$KVER" 2>/dev/null
+  INITRD="/boot/efi/opensuse-slowroll/$KVER/initrd"
+  say "  none existed; building one at $INITRD"
+  AVAIL=$(df -m --output=avail /boot/efi 2>/dev/null | tail -1 | tr -d ' ')
+  if [ -n "$AVAIL" ] && [ "$AVAIL" -lt 90 ]; then
+    bad "only ${AVAIL}M free on the ESP; an initramfs needs ~85M"
+    say "  prune first: esp-prune-kernels <kver>"
+    exit 1
+  fi
+  if ! dracut -f "$INITRD" "$KVER" >>"$LOG" 2>&1; then
     bad "dracut failed; full log: $LOG"
     exit 1
   fi
+  ok "initramfs built"
+fi
+if dracut -f "$INITRD" "$KVER" >>"$LOG" 2>&1; then
+  N=$(lsinitrd "$INITRD" 2>/dev/null | grep -cE 'updates/amdgpu|updates/snd-hda-codec-cs8409')
+  if [ "$N" -ge 2 ]; then
+    ok "initramfs carries both patched modules ($N found)"
+  else
+    bad "initramfs carries only $N of the 2 required modules"
+    say "  check: lsinitrd $INITRD | grep -E 'updates/(amdgpu|snd-hda-codec-cs8409)'"
+    exit 1
+  fi
 else
-  warn "no initrd found for $KVER; rebuild it before booting this kernel"
+  bad "dracut failed; full log: $LOG"
+  exit 1
 fi
 
 step "done"
