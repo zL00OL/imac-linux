@@ -8,11 +8,11 @@
 >   [Headset (EarPods) microphone](#headset-earpods-microphone--fixed-2026-10-07).
 >   Confirm a patched module with
 >   `ls /sys/module/snd_hda_codec_cs8409/parameters | wc -l` → **10**.
-> - **Internal mic: node now exists, capture still silent** — the card was
+> - **Internal mic: ALSA works, PipeWire reads literal zeros — upstream limitation** — the card was
 >   stuck on a playback-only profile so no mic node existed at all. Profile is
 >   fixed at runtime; gain is 40,40 / boost 0. PipeWire-level capture is still
 >   returning digital silence. See
->   [Internal microphone](#internal-microphone--two-faults-2026-10-10).
+>   [Internal microphone](#internal-microphone--three-faults-and-the-third-is-upstream).
 > - **PipeWire capture on kernel 7.2.7: OPEN** — `arecord` works on both
 >   kernels, PipeWire only on 7.2.2. The driver's routing is provably correct;
 >   the fault is downstream. See the section above for the evidence.
@@ -37,7 +37,7 @@ Everything here was measured on openSUSE **Slowroll** (see
 | Section | |
 |---|---|
 | [Headset (EarPods) microphone](#headset-earpods-microphone--fixed-2026-10-07) | capture that was silent for a day |
-| [Internal microphone](#internal-microphone--two-faults-2026-10-10) | no PipeWire node at all, plus a gain control that clipped at 0 dBFS |
+| [Internal microphone](#internal-microphone--three-faults-and-the-third-is-upstream) | ALSA works, PipeWire reads literal zeros — an upstream driver limitation |lus a gain control that clipped at 0 dBFS |
 | [Turning the driver's logging on](#turning-the-drivers-logging-on--the-diagnostic-that-finally-worked) | `MYSOUNDDEBUG`, and why `dmesg` as a normal user lies |
 | [Audio — FIXED](#audio--fixed-tweeters--woofers-verified-2026-10-03) | the working configuration |
 | [Audio: earlier diagnosis](#audio-earlier-diagnosis-kept-for-the-record) | superseded, kept for the record |
@@ -178,14 +178,55 @@ not yet proven.
 microphone** — `arecord`/`parecord` work on both kernels, but PipeWire-native
 applications (OBS, browsers, Discord) need 7.2.2.
 
-## Internal microphone — two faults, 2026-10-10
+## Internal microphone — three faults, and the third is upstream
 
-The mic was reported "not working". That turned out to be **two unrelated faults**,
-and the 2026-10-07 note above only ever addressed one of them — and got the
-direction of it wrong. Both are recorded here because the old note was the reason
-this took a while to find.
+The mic was reported "not working". That turned out to be **three unrelated
+faults**, none of which is the obvious one. The 2026-10-07 note above addressed
+only the first and got its direction wrong.
 
-### Fault 1 (real, and the actual cause): the card had no capture node
+### Fault 3 (upstream, not fixable in user space): PipeWire reads literal zeros
+
+Everything below is measured, not inferred:
+
+```
+arecord -D hw:0,0          rms ≈ 120M, max 803037184, 30 significant bits
+pw-record --target=<node>   264600 samples, nonzero: 0
+pw-record at 200% volume   nonzero: 0
+```
+
+The ALSA path carries **real, full-scale signal**. PipeWire's path carries
+**literal zeros** — not quiet samples, not a shifted bit depth. Raising the
+source to 200% does not change that, which also rules out the 16-bit-in-24-bit
+"multiply by 256" theory from the upstream driver's author (davidjo), which
+applies to the ALSA path on this hardware and not to PipeWire's.
+
+This is **a known upstream limitation.** jackdanyell/imac18-3-cs8409-linux-audio
+(the DKMS source installed here as `snd_hda_macbookpro/0.2`) lists under
+*Known Limitations*:
+
+> - microphone support may be incomplete
+> - internal microphone recording may require additional configuration
+
+and under *Not Yet Fully Verified*: internal microphone recording, external/headset
+microphone. `davidjo/snd_hda_macbookpro` issue #156 is titled "Microphone not
+working on iMac 18,3 27 5K" and is **open**, with the author writing:
+
+> "for some reason iMac internal microphones dont seem to work using the coding
+> developed for MacbookPros … However I dont have an iMac so I cant really do
+> anything about this"
+
+An independent report on this exact hardware (Marek Havlik, 2025) confirms the
+microphone **does** work at the ALSA level and the difficulty is elsewhere.
+
+### What this means in practice
+
+- `arecord -D hw:0,0` **works** and captures real audio. Use it for anything
+  batch: recording, transcription, dictation.
+- Any application built on PipeWire — browsers, OBS, Discord, Zoom — gets
+  **digital silence**. There is no user-space configuration known to fix this,
+  because PipeWire is not receiving samples to amplify.
+
+### Fault 2 (real): the card had no capture node
 
 This is why no application could open the built-in mic. It was not a mute and not
 a level problem.
@@ -212,80 +253,6 @@ it half-applied produced a playback-only graph. The port itself is present and
 fine: `analog-input-internal-mic`, priority 8900. `pactl set-card-profile
 alsa_card.pci-0000_00_1f.3 output:analog-stereo+input:analog-stereo` creates the
 node immediately.
-
-The old rule asked for `output:analog-surround-40`. The internal speakers have
-never been 4-channel on this machine — they enumerate as 2-channel
-`analog-stereo` and work there — so that request bought nothing and cost the
-microphone.
-
-### Fault 2: the gain values
-
-Measured peak per 3s, `hw:0,0` direct, S32:
-
-| Capture Volume | Boost | Peak | Clipped |
-|---|---|---|---|
-| 63 | 2 (+20 dB) | 2147483392 | 13526 |
-| 50 | 0 | 2147483392 | 1155 |
-| 45 | 0 | 1393639424 | 0 |
-| **40** | **0** | **784498688** | **0** |
-| 30 | 0 | 251799552 | 0 |
-| 20 | 0 | 80262656 | 0 |
-
-The 2026-10-07 note recorded 20,20 / 0,0 as the fix for clipping. 20,20 does
-avoid clipping, but it is **~20x too quiet to use** (−28.5 dBFS peak). The clip
-fix and a usable level were conflated. Current setting is **40,40 with boost 0**,
-chosen by ear: ~−8.7 dBFS peak, no clipping.
-
-Codec defaults (63, 2) clip. `imac-mic-on` now sets 40 / 0.
-
-### The switch was never the problem
-
-The old script's header claimed `Internal Mic Capture Switch` comes up `off,off`
-and must be reset every boot. **That is false here.** The service log shows it
-succeeded, the driver does not clear it across any capture-prepare/stop cycle in
-dmesg, and it stays `on,on` under observation. It is still set, as cheap
-insurance, but it was not the fault.
-
-### Why the old script appeared to work and changed nothing
-
-These are not ordinary mixer controls:
-
-```
-Internal Mic Capture Switch    access=rw------    owner write only
-Internal Mic Capture Volume    access=rw---R--    READ ONLY
-Internal Mic Boost Volume      access=rw---R--    READ ONLY
-```
-
-Volume and Boost are marked read-only to *every* user; only the driver's HDA verb
-path sets them. An unprivileged `amixer` exits 0 and changes nothing. The script
-ran as root via systemd so its writes were real — but the values it wrote were
-wrong, and it discarded stderr, so a failure would have been invisible.
-
-`scripts/imac-mic-on` now verifies after writing and exits non-zero on a mismatch.
-
-### Still open
-
-With the duplex profile applied the node exists, but **app-level capture through
-PipeWire returns digital silence** — peak 0, 705600/705600 samples zero — while
-`arecord -D hw:0,0` directly is clean. The hardware path works; something between
-PipeWire and it still yields nothing. Leading suspect is the driver hook in dmesg:
-
-```
-cs_8409_capture_pcm_hook jack_present 0
-```
-
-The codec reports no jack, so the capture hook may be stopping the stream when
-opened through the normal path. **Not resolved.**
-
-### Persistence caveat
-
-The working profile was set with `pactl set-card-profile` and is **runtime only**.
-It will revert on reboot or session restart. The corrected `51-imac-surround.conf`
-written in 0.5+ block syntax did **not** take effect — after restarting
-WirePlumber the profile was still `output:analog-stereo`. Left in place but
-unproven; it is not yet a working fix.
-
-`scripts/imac-verify` checks the gain values.
 
 ## Turning the driver's logging on — the diagnostic that finally worked
 

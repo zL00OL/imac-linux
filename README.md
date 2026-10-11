@@ -312,15 +312,22 @@ the git history if you want them back.
   link-training loops. **Still unfixed.** A patch that appears to address it
   exists — see `docs/kernel-updates.md` — but it is not yet built or verified
   here.
-- **Microphone: capture exists, but PipeWire delivers silence.** ALSA capture on
-  the internal codec works fine (`arecord -D hw:0,0` gives clean signal), so
-  neither the hardware nor the patched codec is the problem. Note that the codec
-  *does* expose a capture device — "the CS8409 exposes no capture at all" is a
-  common and costly misdiagnosis. Two faults sit in the way:
-  a WirePlumber profile left the card playback-only so no mic node existed, and
-  the gain was set ~43 dB too low. The node now exists, but app-level capture
-  through PipeWire still returns digital silence. Open. See
-  [docs/audio.md](docs/audio.md#internal-microphone--two-faults-2026-10-10).
+- **Microphone: ALSA capture works, PipeWire reads literal zeros — an upstream
+  limitation.** Measured, not inferred: `arecord -D hw:0,0` returns full-scale
+  signal (rms ≈ 120M, 30 significant bits), while `pw-record` against the
+  PipeWire source returns 264600 samples of which **nonzero: 0** — literal
+  silence, unchanged at 200% volume. Neither the hardware nor the patched codec
+  is at fault. `jackdanyell/imac18-3-cs8409-linux-audio` (the DKMS source here)
+  lists "microphone support may be incomplete" under Known Limitations, and
+  `davidjo/snd_hda_macbookpro` issue #156, "Microphone not working on iMac 18,3
+  27 5K", is **open** with the author writing "I dont have an iMac so I cant
+  really do anything about this". An independent report on this exact hardware
+  confirms capture works at the ALSA level.
+  **Practical upshot:** `arecord -D hw:0,0` works today for recording and
+  transcription. Browsers, OBS and anything else on PipeWire get silence, and no
+  user-space configuration is known to fix that, because PipeWire is not
+  receiving samples at all. See [docs/audio.md](docs/audio.md#internal-microphone--three-faults-and-the-third-is-upstream).
+
 - **A speaker EQ is not achievable.** PipeWire's `filter-chain` module fails to
   initialise on this machine, and with `nofail` it fails silently — audio
   bypasses the EQ while every tool reports success. This is also why the
