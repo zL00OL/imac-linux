@@ -4,7 +4,7 @@
 # for any account rather than only the one they were written on.
 UH=${SUDO_USER:-$(logname 2>/dev/null || echo "${USER:-root}")}
 UHOME=$(getent passwd "$UH" 2>/dev/null | cut -d: -f6)
-[ -n "$UHOME" ] || UHOME="$HOME"
+[ -n "$UHOME" ] || UHOME="${HOME:-/root}"
 
 #==============================================================================
 # imac-update - update openSUSE on this iMac and re-apply every local patch

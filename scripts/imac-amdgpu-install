@@ -47,7 +47,13 @@ export PATH=/usr/sbin:/usr/bin:/sbin
 # The repo is not on every machine that runs this script (the iMac itself may not
 # have a checkout), so accept a patch directory override, and fall back to any
 # local checkout rather than hard-failing on a missing repo.
-REPO=${IMAC_REPO:-$HOME/imac-a2115-repo}
+#
+# HOME is referenced with ${HOME:-} deliberately. A systemd unit does not set
+# HOME, and `set -u` turns an unset variable into a fatal error - so this line
+# killed the build the instant the kernel-install hook started the unit. That
+# made every future kernel update arrive with a stock amdgpu, with the hook
+# printing a warning nobody would read in time.
+REPO=${IMAC_REPO:-${HOME:-/root}/imac-a2115-repo}
 PATCHDIR=${IMAC_PATCHDIR:-}
 if [ -z "$PATCHDIR" ]; then
   for cand in "$REPO/patches/amdgpu-5k" \
